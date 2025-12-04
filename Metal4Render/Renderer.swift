@@ -1801,7 +1801,6 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
         // ────────────────────────────────────────────────────────────────────
         // 5. Command Allocator 리셋 및 Command Buffer 시작
         // ────────────────────────────────────────────────────────────────────
-        frameIndex += 1
         let allocator = commandAllocators[Int(frameIndex % maxFramesInFlight)]
         allocator.reset()  // 이전 프레임의 커맨드 데이터 해제
 
@@ -1858,6 +1857,9 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
         // ────────────────────────────────────────────────────────────────────
         // 다음 프레임에서 이 프레임의 리소스를 재사용할 수 있음을 알림
         commandQueue.signalEvent(frameCompletionEvent, value: frameIndex)
+
+        // 프레임 인덱스 증가 (다음 프레임 준비)
+        frameIndex += 1
     }
 }
 
