@@ -1850,7 +1850,6 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
         commandQueue.waitForDrawable(drawable)    // Drawable 준비 대기
         commandQueue.commit([commandBuffer])       // GPU에 커맨드 제출
         commandQueue.signalDrawable(drawable)      // Drawable 완료 시그널
-        drawable.present()                         // 화면에 표시
 
         // ────────────────────────────────────────────────────────────────────
         // 10. 프레임 완료 시그널
@@ -1860,6 +1859,8 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
 
         // 프레임 인덱스 증가 (다음 프레임 준비)
         frameIndex += 1
+        
+        drawable.present()                         // 화면에 표시
     }
 }
 
