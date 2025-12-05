@@ -1166,6 +1166,18 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
     /// 삼각형의 3개 버텍스 데이터가 저장된 GPU 버퍼입니다.
     private var vertexBuffer: MTLBuffer!
 
+    /// 인덱스 버퍼
+    ///
+    /// 삼각형을 구성하는 버텍스의 인덱스가 저장된 GPU 버퍼입니다.
+    /// 인덱스 버퍼를 사용하면 버텍스를 재사용할 수 있어
+    /// 복잡한 메시에서 메모리를 절약할 수 있습니다.
+    private var indexBuffer: MTLBuffer!
+
+    /// 인덱스 개수
+    ///
+    /// 삼각형 하나는 3개의 인덱스로 구성됩니다.
+    private var indexCount: Int = 0
+
     /// 유니폼 버퍼 배열 (프레임당 하나)
     ///
     /// 각 프레임의 변환 행렬을 저장합니다.
@@ -1383,6 +1395,30 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
         )
 
         // ────────────────────────────────────────────────────────────────────
+        // 인덱스 버퍼 생성
+        // ────────────────────────────────────────────────────────────────────
+        // 인덱스 버퍼는 버텍스를 재사용하여 메모리를 절약합니다.
+        // 예: 사각형은 4개의 버텍스와 6개의 인덱스로 2개의 삼각형을 표현
+        //     (버텍스 6개 대신 4개로 충분)
+        //
+        // 현재 삼각형:
+        // 버텍스 0 (상단) ──── 버텍스 1 (우하단)
+        //        ╲              ╱
+        //         ╲            ╱
+        //          ╲          ╱
+        //           버텍스 2 (좌하단)
+        //
+        // 인덱스 순서: 0 → 1 → 2 (시계 방향)
+        let indices: [UInt16] = [0, 1, 2]
+        indexCount = indices.count
+
+        indexBuffer = device.makeBuffer(
+            bytes: indices,
+            length: MemoryLayout<UInt16>.stride * indices.count,
+            options: .storageModeShared
+        )
+
+        // ────────────────────────────────────────────────────────────────────
         // 유니폼 버퍼 배열 생성 (Triple Buffering)
         // ────────────────────────────────────────────────────────────────────
         // 각 프레임이 독립적인 버퍼를 사용하여
@@ -1478,6 +1514,9 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
     private func setupResidency() {
         // 버텍스 버퍼 등록
         residencySet.addAllocation(vertexBuffer)
+
+        // 인덱스 버퍼 등록
+        residencySet.addAllocation(indexBuffer)
 
         // 모든 유니폼 버퍼 등록
         for buffer in uniformBuffers {
@@ -1832,12 +1871,21 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
         renderEncoder.setArgumentTable(vertexArgumentTable, stages: .vertex)
 
         // ────────────────────────────────────────────────────────────────────
-        // 8. 삼각형 그리기
+        // 8. 인덱스 버퍼를 사용하여 삼각형 그리기
         // ────────────────────────────────────────────────────────────────────
-        renderEncoder.drawPrimitives(
+        // drawIndexedPrimitives는 인덱스 버퍼를 통해 버텍스를 참조합니다.
+        // 이 방식의 장점:
+        // 1. 버텍스 재사용으로 메모리 절약 (사각형: 6버텍스 → 4버텍스)
+        // 2. GPU 버텍스 캐시 효율 향상
+        // 3. 복잡한 메시에서 필수적
+        //
+        // Metal 4에서는 gpuAddress와 버퍼 길이를 직접 전달합니다.
+        renderEncoder.drawIndexedPrimitives(
             primitiveType: .triangle,
-            vertexStart: 0,
-            vertexCount: 3
+            indexCount: indexCount,
+            indexType: .uint16,
+            indexBuffer: indexBuffer.gpuAddress,
+            indexBufferLength: indexBuffer.length
         )
 
         renderEncoder.endEncoding()
@@ -1899,6 +1947,14 @@ class LegacyMetalRenderer: NSObject, MTKViewDelegate {
 
     /// 버텍스 버퍼
     var vertexBuffer: MTLBuffer!
+
+    /// 인덱스 버퍼
+    ///
+    /// 삼각형을 구성하는 버텍스의 인덱스가 저장된 GPU 버퍼입니다.
+    var indexBuffer: MTLBuffer!
+
+    /// 인덱스 개수
+    var indexCount: Int = 0
 
     /// 유니폼 버퍼 (단일 - 동기 렌더링)
     var uniformBuffer: MTLBuffer!
@@ -1973,6 +2029,17 @@ class LegacyMetalRenderer: NSObject, MTKViewDelegate {
         vertexBuffer = device.makeBuffer(
             bytes: vertices,
             length: MemoryLayout<Vertex>.stride * vertices.count,
+            options: .storageModeShared
+        )
+
+        // 인덱스 버퍼 생성
+        // 인덱스 버퍼를 사용하면 버텍스를 재사용할 수 있어 메모리 효율적
+        let indices: [UInt16] = [0, 1, 2]
+        indexCount = indices.count
+
+        indexBuffer = device.makeBuffer(
+            bytes: indices,
+            length: MemoryLayout<UInt16>.stride * indices.count,
             options: .storageModeShared
         )
 
@@ -2082,7 +2149,14 @@ class LegacyMetalRenderer: NSObject, MTKViewDelegate {
         renderEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
         renderEncoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
 
-        renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        // 인덱스 버퍼를 사용하여 삼각형 그리기
+        renderEncoder.drawIndexedPrimitives(
+            type: .triangle,
+            indexCount: indexCount,
+            indexType: .uint16,
+            indexBuffer: indexBuffer,
+            indexBufferOffset: 0
+        )
 
         renderEncoder.endEncoding()
 
