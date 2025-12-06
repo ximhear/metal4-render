@@ -542,9 +542,9 @@ func rotationX(_ angle: Float) -> float4x4 {
 
 ```
 Ry = ┌                       ┐
-     │  cos(θ)  0  -sin(θ)  0 │
+     │  cos(θ)  0   sin(θ)  0 │
      │    0     1     0     0 │
-     │  sin(θ)  0   cos(θ)  0 │
+     │ -sin(θ)  0   cos(θ)  0 │
      │    0     0     0     1 │
      └                       ┘
 ```
