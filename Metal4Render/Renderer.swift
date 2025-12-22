@@ -930,6 +930,12 @@ struct Vertex {
     /// - z: 양수 = 화면 안쪽(멀어짐), 음수 = 화면 바깥쪽(가까워짐)
     var position: SIMD3<Float>
 
+    /// 버텍스 노말 (법선 벡터)
+    ///
+    /// 표면의 방향을 나타내는 단위 벡터입니다.
+    /// 라이팅 계산에 사용됩니다.
+    var normal: SIMD3<Float>
+
     /// 버텍스 색상 (RGBA)
     ///
     /// 각 컴포넌트는 0.0 ~ 1.0 범위:
@@ -987,6 +993,17 @@ struct Uniforms {
     /// 3D 좌표를 2D 클립 좌표로 변환합니다.
     /// `perspectiveProjectionLH()` 함수로 생성됩니다.
     var projectionMatrix: float4x4
+
+    /// 광원 방향 (정규화된 벡터)
+    ///
+    /// 디렉셔널 라이트의 방향을 나타냅니다.
+    /// 빛이 오는 방향의 반대 방향을 가리킵니다.
+    var lightDirection: SIMD3<Float>
+
+    /// 카메라/눈 위치 (월드 좌표)
+    ///
+    /// 스페큘러 라이팅 계산에 사용됩니다.
+    var eyePosition: SIMD3<Float>
 }
 
 
@@ -1234,8 +1251,8 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
     ///   - sensitivity: 회전 감도 (기본값 0.005)
     func updateRotation(deltaX: Float, deltaY: Float, sensitivity: Float = 0.005) {
         // 드래그 변위를 회전 각도로 변환
-        let angleX = deltaY * sensitivity  // 상하 드래그 → X축 회전
-        let angleY = deltaX * sensitivity  // 좌우 드래그 → Y축 회전
+        let angleX = deltaY * sensitivity   // 상하 드래그 → X축 회전
+        let angleY = -deltaX * sensitivity  // 좌우 드래그 → Y축 회전 (반전)
 
         // 각 축에 대한 회전 쿼터니언 생성
         let rotationX = simd_quatf(angle: angleX, axis: SIMD3<Float>(1, 0, 0))
@@ -1923,10 +1940,17 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
         // ────────────────────────────────────────────────────────────────────
         // 4. 유니폼 버퍼 업데이트
         // ────────────────────────────────────────────────────────────────────
+
+        // 라이트 방향: 오른쪽 위에서 비추는 디렉셔널 라이트
+        // (빛이 오는 방향을 가리킴, 표면에서 빛을 향하는 벡터)
+        let lightDirection = simd_normalize(SIMD3<Float>(0.5, 1.0, -0.3))
+
         var uniforms = Uniforms(
             modelMatrix: modelMatrix,
             viewMatrix: viewMatrix,
-            projectionMatrix: projectionMatrix
+            projectionMatrix: projectionMatrix,
+            lightDirection: lightDirection,
+            eyePosition: eye
         )
 
         let currentUniformBuffer = uniformBuffers[Int(frameIndex % maxFramesInFlight)]
@@ -1963,9 +1987,12 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
         // 기존 Metal: renderEncoder.setVertexBuffer(buffer, offset:, index:)
         // Metal 4: argumentTable.setAddress(buffer.gpuAddress, index:)
         //          renderEncoder.setArgumentTable(table, stages:)
+        //
+        // 버텍스 셰이더: index 0 = vertexBuffer, index 1 = uniformBuffer
+        // 프래그먼트 셰이더: index 1 = uniformBuffer (라이팅 계산용)
         vertexArgumentTable.setAddress(vertexBuffer.gpuAddress, index: 0)
         vertexArgumentTable.setAddress(currentUniformBuffer.gpuAddress, index: 1)
-        renderEncoder.setArgumentTable(vertexArgumentTable, stages: .vertex)
+        renderEncoder.setArgumentTable(vertexArgumentTable, stages: [.vertex, .fragment])
 
         // ────────────────────────────────────────────────────────────────────
         // 8. 인덱스 버퍼를 사용하여 삼각형 그리기
@@ -2121,10 +2148,12 @@ class LegacyMetalRenderer: NSObject, MTKViewDelegate {
     /// GPU 버퍼 생성
     private func buildBuffers() {
         // 삼각형 버텍스 데이터
+        // 노말은 삼각형 평면에 수직인 방향 (카메라를 향해 -Z)
+        let normal = SIMD3<Float>(0, 0, -1)
         let vertices: [Vertex] = [
-            Vertex(position: SIMD3<Float>(0.0, 0.5, 0.0), color: SIMD4<Float>(1.0, 0.0, 0.0, 1.0)),
-            Vertex(position: SIMD3<Float>(0.5, -0.5, 0.0), color: SIMD4<Float>(0.0, 1.0, 0.0, 1.0)),
-            Vertex(position: SIMD3<Float>(-0.5, -0.5, 0.0), color: SIMD4<Float>(0.0, 0.0, 1.0, 1.0))
+            Vertex(position: SIMD3<Float>(0.0, 0.5, 0.0), normal: normal, color: SIMD4<Float>(1.0, 0.0, 0.0, 1.0)),
+            Vertex(position: SIMD3<Float>(0.5, -0.5, 0.0), normal: normal, color: SIMD4<Float>(0.0, 1.0, 0.0, 1.0)),
+            Vertex(position: SIMD3<Float>(-0.5, -0.5, 0.0), normal: normal, color: SIMD4<Float>(0.0, 0.0, 1.0, 1.0))
         ]
 
         vertexBuffer = device.makeBuffer(
@@ -2236,10 +2265,13 @@ class LegacyMetalRenderer: NSObject, MTKViewDelegate {
         )
 
         // 유니폼 버퍼 업데이트
+        let lightDirection = simd_normalize(SIMD3<Float>(0.5, 1.0, -0.3))
         var uniforms = Uniforms(
             modelMatrix: modelMatrix,
             viewMatrix: viewMatrix,
-            projectionMatrix: projectionMatrix
+            projectionMatrix: projectionMatrix,
+            lightDirection: lightDirection,
+            eyePosition: eye
         )
         uniformBuffer.contents().copyMemory(from: &uniforms, byteCount: MemoryLayout<Uniforms>.stride)
 

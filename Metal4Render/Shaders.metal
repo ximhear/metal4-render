@@ -636,6 +636,11 @@ struct Vertex {
     /// - z: 깊이 위치 (0.0 ~ 1.0, 가까운 곳이 0)
     float3 position;
 
+    /// 버텍스 노말 (법선 벡터)
+    /// 표면의 방향을 나타내는 단위 벡터
+    /// 라이팅 계산에 사용됨
+    float3 normal;
+
     /// 버텍스 색상 (RGBA 형식)
     /// - r: 빨간색 강도 (0.0 ~ 1.0)
     /// - g: 초록색 강도 (0.0 ~ 1.0)
@@ -675,6 +680,14 @@ struct VertexOut {
     /// - z: 0 ~ +w  (Metal의 깊이 범위는 0 ~ 1)
     /// - w: 원근 분할에 사용되는 동차 좌표
     float4 position [[position]];
+
+    /// 월드 공간에서의 위치
+    /// 스페큘러 라이팅 계산에 사용됨
+    float3 worldPosition;
+
+    /// 월드 공간에서의 노말 (정규화됨)
+    /// 라이팅 계산에 사용됨
+    float3 worldNormal;
 
     /// 보간된 버텍스 색상
     ///
@@ -765,6 +778,14 @@ struct Uniforms {
     /// - Aspect Ratio: 화면 가로/세로 비율
     /// - Near/Far: 클리핑 평면 거리
     float4x4 projectionMatrix;
+
+    /// 광원 방향 (정규화된 벡터)
+    /// 디렉셔널 라이트가 오는 방향 (빛이 오는 곳을 향함)
+    float3 lightDirection;
+
+    /// 카메라/눈 위치 (월드 좌표)
+    /// 스페큘러 라이팅 계산에 사용됨
+    float3 eyePosition;
 };
 
 
@@ -859,7 +880,26 @@ vertex VertexOut vertexShader(
     // - z: 깊이 값 (깊이 테스트에 사용)
     // - w: 원근 분할을 위한 값 (보통 카메라까지의 거리와 관련)
     //
-    out.position = mvp * float4(vertices[vertexID].position, 1.0);
+    float4 localPosition = float4(vertices[vertexID].position, 1.0);
+    out.position = mvp * localPosition;
+
+    // ────────────────────────────────────────────────────────────────
+    // 월드 좌표 및 노말 계산 (라이팅용)
+    // ────────────────────────────────────────────────────────────────
+    //
+    // 월드 좌표: 모델 행렬만 적용
+    float4 worldPos = uniforms->modelMatrix * localPosition;
+    out.worldPosition = worldPos.xyz;
+
+    // 노말 변환: 모델 행렬의 3x3 부분만 사용 (이동 제외)
+    // 비균등 스케일이 있으면 역전치 행렬을 사용해야 하지만,
+    // 균등 스케일만 사용하므로 단순 변환 후 정규화
+    float3x3 normalMatrix = float3x3(
+        uniforms->modelMatrix[0].xyz,
+        uniforms->modelMatrix[1].xyz,
+        uniforms->modelMatrix[2].xyz
+    );
+    out.worldNormal = normalize(normalMatrix * vertices[vertexID].normal);
 
     // ────────────────────────────────────────────────────────────────
     // 버텍스 색상 전달 (Pass-through)
@@ -933,19 +973,62 @@ vertex VertexOut vertexShader(
 ///
 /// - Note: 삼각형 내부의 모든 픽셀에 대해 실행되므로,
 ///         작은 삼각형이라도 수백~수천 번 실행될 수 있습니다.
-fragment float4 fragmentShader(VertexOut in [[stage_in]]) {
+fragment float4 fragmentShader(
+    VertexOut in [[stage_in]],
+    const device Uniforms* uniforms [[buffer(1)]]
+) {
     // ────────────────────────────────────────────────────────────────
-    // 최종 색상 출력
+    // Blinn-Phong 라이팅 모델
     // ────────────────────────────────────────────────────────────────
     //
-    // 보간된 색상을 그대로 반환합니다.
-    // 결과적으로 세 버텍스(빨강, 초록, 파랑)의 색상이
-    // 삼각형 전체에 걸쳐 부드럽게 그라디언트로 표현됩니다.
+    // 라이팅 구성요소:
+    // 1. Ambient (환경광): 모든 방향에서 오는 간접광
+    // 2. Diffuse (확산광): 표면에서 모든 방향으로 균일하게 반사
+    // 3. Specular (반사광): 특정 방향으로 강하게 반사 (하이라이트)
     //
-    // 출력 형식: float4(R, G, B, A)
-    // - 각 채널은 0.0 ~ 1.0 범위
-    // - 프레임 버퍼의 픽셀 포맷에 맞게 자동 변환됨
-    //   (예: BGRA8Unorm_sRGB의 경우 0~255 정수로 변환)
+
+    // 노말과 라이트 방향 정규화
+    float3 normal = normalize(in.worldNormal);
+    float3 lightDir = normalize(uniforms->lightDirection);
+
+    // ────────────────────────────────────────────────────────────────
+    // 1. Ambient (환경광)
+    // ────────────────────────────────────────────────────────────────
+    float ambientStrength = 0.3;
+    float3 ambient = ambientStrength * in.color.rgb;
+
+    // ────────────────────────────────────────────────────────────────
+    // 2. Diffuse (확산광) - Lambertian 반사
+    // ────────────────────────────────────────────────────────────────
     //
-    return in.color;
+    // dot(N, L) = cos(θ) : 노말과 빛 방향 사이의 각도
+    // 빛이 표면에 수직일수록 밝음 (cos(0°) = 1.0)
+    // 빛이 표면과 평행하면 어두움 (cos(90°) = 0.0)
+    //
+    float diff = max(dot(normal, lightDir), 0.0);
+    float3 diffuse = diff * in.color.rgb;
+
+    // ────────────────────────────────────────────────────────────────
+    // 3. Specular (반사광) - Blinn-Phong
+    // ────────────────────────────────────────────────────────────────
+    //
+    // Half vector: 빛 방향과 뷰 방향의 중간 벡터
+    // 하이라이트 크기는 shininess로 조절 (높을수록 날카로운 반사)
+    //
+    float3 viewDir = normalize(uniforms->eyePosition - in.worldPosition);
+    float3 halfDir = normalize(lightDir + viewDir);
+    float shininess = 32.0;
+    float spec = pow(max(dot(normal, halfDir), 0.0), shininess);
+    float specularStrength = 0.5;
+    float3 specular = specularStrength * spec * float3(1.0);  // 흰색 하이라이트
+
+    // ────────────────────────────────────────────────────────────────
+    // 최종 색상 합성
+    // ────────────────────────────────────────────────────────────────
+    float3 result = ambient + diffuse + specular;
+
+    // 색상 클램핑 (0.0 ~ 1.0 범위로 제한)
+    result = clamp(result, 0.0, 1.0);
+
+    return float4(result, in.color.a);
 }

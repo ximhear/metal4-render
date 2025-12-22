@@ -80,10 +80,49 @@ class OBJLoader {
 
     // MARK: - Color Generation
 
+    /// 버스 모델의 머티리얼 이름에 대한 사전 정의된 색상
+    private static let busColors: [String: SIMD4<Float>] = [
+        // 버스 차체 - 진한 남색/검정
+        "citybus3_dark": SIMD4<Float>(0.15, 0.15, 0.2, 1.0),
+        // LED 조명 - 밝은 노란색
+        "citybus_led": SIMD4<Float>(1.0, 0.9, 0.3, 1.0),
+        // 거울 - 반사되는 은색
+        "mirror_citybus_dark": SIMD4<Float>(0.6, 0.6, 0.65, 1.0),
+        // 유리 - 투명한 파란색 (반투명)
+        "glass": SIMD4<Float>(0.3, 0.4, 0.5, 0.7),
+        "Glass_Clear": SIMD4<Float>(0.3, 0.4, 0.5, 0.7),
+        // 바퀴 - 검정색
+        "wheel": SIMD4<Float>(0.1, 0.1, 0.1, 1.0),
+        // 파란색 버스 (선택사항)
+        "Bus_Blue": SIMD4<Float>(0.1, 0.3, 0.6, 1.0)
+    ]
+
+    /// 머티리얼 이름으로 버스 색상 찾기
+    /// - Parameter name: 머티리얼 이름
+    /// - Returns: 매칭되는 색상 또는 nil
+    private static func findBusColor(_ name: String) -> SIMD4<Float>? {
+        // 정확한 매칭 시도
+        if let color = busColors[name] {
+            return color
+        }
+        // 부분 문자열 매칭 (예: "citybus3_dark.007" -> "citybus3_dark")
+        for (key, color) in busColors {
+            if name.lowercased().contains(key.lowercased()) {
+                return color
+            }
+        }
+        return nil
+    }
+
     /// 머티리얼 이름에서 고유 색상 생성
     /// - Parameter name: 머티리얼 이름
-    /// - Returns: 이름 해시 기반의 RGBA 색상
+    /// - Returns: 사전 정의 색상 또는 이름 해시 기반의 RGBA 색상
     private static func generateColorFromName(_ name: String) -> SIMD4<Float> {
+        // 먼저 버스 관련 색상 확인
+        if let busColor = findBusColor(name) {
+            return busColor
+        }
+
         // 이름 해시를 사용하여 일관된 색상 생성
         var hash: UInt32 = 5381
         for char in name.utf8 {
@@ -351,6 +390,7 @@ class OBJLoader {
         }
 
         // 인덱스 파싱
+        // 형식: v, v/vt, v/vt/vn, v//vn
         let components = faceVertex.split(separator: "/", omittingEmptySubsequences: false)
 
         guard let posIndexStr = components.first,
@@ -363,8 +403,19 @@ class OBJLoader {
         // OBJ 인덱스는 1부터 시작
         let position = positions[posIndex - 1]
 
-        // 새 버텍스 생성
-        let vertex = Vertex(position: position, color: currentColor)
+        // 노말 인덱스 파싱 (형식: v/vt/vn 또는 v//vn)
+        var normal = SIMD3<Float>(0, 1, 0)  // 기본 노말 (위쪽)
+        if components.count >= 3 {
+            let normalIndexStr = components[2]
+            if let normalIndex = Int(normalIndexStr),
+               normalIndex > 0,
+               normalIndex <= normals.count {
+                normal = normals[normalIndex - 1]
+            }
+        }
+
+        // 새 버텍스 생성 (노말 포함)
+        let vertex = Vertex(position: position, normal: normal, color: currentColor)
 
         // 버텍스 배열에 추가
         let newIndex = UInt32(vertices.count)
