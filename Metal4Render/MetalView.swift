@@ -44,6 +44,62 @@ import MetalKit
 
 #if os(macOS)
 
+// ════════════════════════════════════════════════════════════════════════════
+// MARK: - Interactive MTKView (macOS)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// 마우스 드래그를 지원하는 커스텀 MTKView
+///
+/// 마우스 드래그 이벤트를 캡처하여 렌더러의 쿼터니언 회전을 업데이트합니다.
+class InteractiveMTKView: MTKView {
+
+    /// 드래그 시작 위치
+    private var dragStartLocation: NSPoint = .zero
+
+    /// 현재 드래그 중인지 여부
+    private var isDragging = false
+
+    /// Metal 4 렌더러 참조 (약한 참조로 순환 참조 방지)
+    @available(macOS 26.0, *)
+    weak var metal4Renderer: Metal4Renderer? {
+        get { _metal4Renderer as? Metal4Renderer }
+        set { _metal4Renderer = newValue }
+    }
+    private weak var _metal4Renderer: AnyObject?
+
+    // MARK: - Mouse Events
+
+    override func mouseDown(with event: NSEvent) {
+        isDragging = true
+        dragStartLocation = event.locationInWindow
+
+        // 렌더러에 드래그 시작 알림
+        if #available(macOS 26.0, *) {
+            metal4Renderer?.beginDrag()
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDragging else { return }
+
+        let currentLocation = event.locationInWindow
+        let deltaX = Float(currentLocation.x - dragStartLocation.x)
+        let deltaY = Float(currentLocation.y - dragStartLocation.y)
+
+        // 렌더러의 회전 업데이트
+        if #available(macOS 26.0, *) {
+            metal4Renderer?.updateRotation(deltaX: deltaX, deltaY: deltaY)
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        isDragging = false
+    }
+
+    // 마우스 이벤트를 받기 위해 필요
+    override var acceptsFirstResponder: Bool { true }
+}
+
 /// macOS용 Metal 뷰
 ///
 /// `NSViewRepresentable` 프로토콜을 구현하여 SwiftUI에서
@@ -98,9 +154,9 @@ struct MetalView: NSViewRepresentable {
     /// - Returns: 설정된 MTKView 인스턴스
     func makeNSView(context: Context) -> MTKView {
         // ────────────────────────────────────────────────────────────────────
-        // MTKView 생성
+        // InteractiveMTKView 생성 (마우스 드래그 지원)
         // ────────────────────────────────────────────────────────────────────
-        let mtkView = MTKView()
+        let mtkView = InteractiveMTKView()
 
         // ────────────────────────────────────────────────────────────────────
         // OS 버전에 따른 렌더러 선택
@@ -117,6 +173,8 @@ struct MetalView: NSViewRepresentable {
             if let renderer = Metal4Renderer(mtkView: mtkView) {
                 // Coordinator에 렌더러 저장 (강한 참조 유지)
                 context.coordinator.metal4Renderer = renderer
+                // InteractiveMTKView에 렌더러 참조 설정 (마우스 이벤트 전달용)
+                mtkView.metal4Renderer = renderer
                 // MTKView의 delegate를 렌더러로 설정
                 // → 매 프레임 draw(in:) 메서드가 호출됨
                 mtkView.delegate = renderer
@@ -250,6 +308,115 @@ struct MetalView: NSViewRepresentable {
 // MARK: - iOS/iPadOS/tvOS/visionOS Implementation
 // ════════════════════════════════════════════════════════════════════════════
 
+// ════════════════════════════════════════════════════════════════════════════
+// MARK: - Interactive MTKView (iOS)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// 터치 드래그 및 핀치 줌을 지원하는 커스텀 MTKView
+///
+/// - 터치 드래그: 쿼터니언 기반 회전
+/// - 핀치 줌: 카메라 거리 조절
+class InteractiveMTKView: MTKView {
+
+    /// 드래그 시작 위치
+    private var dragStartLocation: CGPoint = .zero
+
+    /// 핀치 줌 시작 시 두 터치 사이의 거리
+    private var initialPinchDistance: CGFloat = 0
+
+    /// Metal 4 렌더러 참조 (약한 참조로 순환 참조 방지)
+    @available(iOS 26.0, *)
+    weak var metal4Renderer: Metal4Renderer? {
+        get { _metal4Renderer as? Metal4Renderer }
+        set { _metal4Renderer = newValue }
+    }
+    private weak var _metal4Renderer: AnyObject?
+
+    // MARK: - Helper Methods
+
+    /// 두 터치 포인트 사이의 거리 계산
+    private func distanceBetween(_ touch1: UITouch, _ touch2: UITouch) -> CGFloat {
+        let point1 = touch1.location(in: self)
+        let point2 = touch2.location(in: self)
+        let dx = point2.x - point1.x
+        let dy = point2.y - point1.y
+        return sqrt(dx * dx + dy * dy)
+    }
+
+    // MARK: - Touch Events
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let allTouches = event?.allTouches else { return }
+
+        if allTouches.count == 1 {
+            // 단일 터치: 드래그 회전 시작
+            guard let touch = touches.first else { return }
+            dragStartLocation = touch.location(in: self)
+
+            if #available(iOS 26.0, *) {
+                metal4Renderer?.beginDrag()
+            }
+        } else if allTouches.count == 2 {
+            // 두 손가락 터치: 핀치 줌 시작
+            let touchArray = Array(allTouches)
+            initialPinchDistance = distanceBetween(touchArray[0], touchArray[1])
+        }
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let allTouches = event?.allTouches else { return }
+
+        if allTouches.count == 1 {
+            // 단일 터치: 드래그 회전
+            guard let touch = allTouches.first else { return }
+
+            let currentLocation = touch.location(in: self)
+            let deltaX = Float(currentLocation.x - dragStartLocation.x)
+            let deltaY = Float(currentLocation.y - dragStartLocation.y)
+
+            // iOS는 Y축이 아래로 증가하므로 deltaY 부호 반전
+            if #available(iOS 26.0, *) {
+                metal4Renderer?.updateRotation(deltaX: deltaX, deltaY: -deltaY)
+            }
+        } else if allTouches.count == 2 {
+            // 두 손가락 터치: 핀치 줌
+            let touchArray = Array(allTouches)
+            let currentDistance = distanceBetween(touchArray[0], touchArray[1])
+
+            if initialPinchDistance > 0 {
+                let scale = Float(currentDistance / initialPinchDistance)
+                if #available(iOS 26.0, *) {
+                    metal4Renderer?.updateZoom(scale: scale)
+                }
+                // 현재 거리를 새로운 기준으로 설정 (점진적 줌)
+                initialPinchDistance = currentDistance
+            }
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let allTouches = event?.allTouches else { return }
+
+        // 남은 터치가 1개이면 드래그 시작으로 전환
+        if allTouches.count == 2 && touches.count == 1 {
+            // 하나의 손가락만 떼면, 남은 손가락으로 드래그 시작
+            let remainingTouches = allTouches.subtracting(touches)
+            if let remainingTouch = remainingTouches.first {
+                dragStartLocation = remainingTouch.location(in: self)
+                if #available(iOS 26.0, *) {
+                    metal4Renderer?.beginDrag()
+                }
+            }
+        }
+
+        initialPinchDistance = 0
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        initialPinchDistance = 0
+    }
+}
+
 /// iOS용 Metal 뷰
 ///
 /// `UIViewRepresentable` 프로토콜을 구현하여 SwiftUI에서
@@ -294,7 +461,10 @@ struct MetalView: UIViewRepresentable {
     /// - Parameter context: SwiftUI가 제공하는 컨텍스트
     /// - Returns: 설정된 MTKView 인스턴스
     func makeUIView(context: Context) -> MTKView {
-        let mtkView = MTKView()
+        // ────────────────────────────────────────────────────────────────────
+        // InteractiveMTKView 생성 (터치 드래그 지원)
+        // ────────────────────────────────────────────────────────────────────
+        let mtkView = InteractiveMTKView()
 
         // ────────────────────────────────────────────────────────────────────
         // OS 버전에 따른 렌더러 선택
@@ -302,7 +472,11 @@ struct MetalView: UIViewRepresentable {
         if #available(iOS 26.0, *) {
             // iOS 26.0+: Metal 4 렌더러
             if let renderer = Metal4Renderer(mtkView: mtkView) {
+                // Coordinator에 렌더러 저장 (강한 참조 유지)
                 context.coordinator.metal4Renderer = renderer
+                // InteractiveMTKView에 렌더러 참조 설정 (터치 이벤트 전달용)
+                mtkView.metal4Renderer = renderer
+                // MTKView의 delegate를 렌더러로 설정
                 mtkView.delegate = renderer
             }
         } else {
@@ -325,6 +499,9 @@ struct MetalView: UIViewRepresentable {
         mtkView.preferredFramesPerSecond = 60
         mtkView.enableSetNeedsDisplay = false
         mtkView.isPaused = false
+
+        // 멀티 터치 활성화 (핀치 줌용)
+        mtkView.isMultipleTouchEnabled = true
 
         return mtkView
     }

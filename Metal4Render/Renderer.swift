@@ -1194,10 +1194,75 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
     /// `frameIndex % maxFramesInFlight`로 현재 사용할 버퍼 인덱스를 계산합니다.
     private var frameIndex: UInt64 = 0
 
-    /// 현재 회전 각도 (라디안)
+    // ────────────────────────────────────────────────────────────────────────
+    // Quaternion Rotation (Gimbal Lock 방지)
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// 현재 회전 상태를 나타내는 쿼터니언
     ///
-    /// 매 프레임마다 증가하여 삼각형이 Y축을 중심으로 회전하게 합니다.
-    private var rotation: Float = 0
+    /// 쿼터니언을 사용하면 Gimbal Lock 없이 부드러운 회전이 가능합니다.
+    /// - 초기값: 단위 쿼터니언 (회전 없음)
+    private var rotationQuaternion = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
+
+    /// 드래그 시작 시점의 쿼터니언 (드래그 중 누적 계산용)
+    private var dragStartQuaternion = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
+
+    /// 카메라 거리 (줌 레벨)
+    ///
+    /// 값이 클수록 카메라가 멀리 있어 물체가 작게 보입니다.
+    /// - 기본값: 8.0 (적절한 거리에서 버스 전체가 보임)
+    /// - 최소값: 2.0 (너무 가까우면 클리핑 발생)
+    /// - 최대값: 30.0 (너무 멀면 물체가 너무 작음)
+    private var cameraDistance: Float = 8.0
+    private let minCameraDistance: Float = 2.0
+    private let maxCameraDistance: Float = 30.0
+
+    /// 핀치 줌으로 카메라 거리 업데이트
+    ///
+    /// - Parameter scale: 핀치 제스처의 스케일 값 (1.0 = 변화 없음, >1.0 = 확대, <1.0 = 축소)
+    func updateZoom(scale: Float) {
+        // 스케일이 1보다 크면 확대 (카메라 가까이), 작으면 축소 (카메라 멀리)
+        cameraDistance = cameraDistance / scale
+        cameraDistance = max(minCameraDistance, min(maxCameraDistance, cameraDistance))
+    }
+
+    /// 마우스 드래그로 회전 업데이트
+    ///
+    /// - Parameters:
+    ///   - deltaX: X축 드래그 변위 (화면 좌표)
+    ///   - deltaY: Y축 드래그 변위 (화면 좌표)
+    ///   - sensitivity: 회전 감도 (기본값 0.005)
+    func updateRotation(deltaX: Float, deltaY: Float, sensitivity: Float = 0.005) {
+        // 드래그 변위를 회전 각도로 변환
+        let angleX = deltaY * sensitivity  // 상하 드래그 → X축 회전
+        let angleY = deltaX * sensitivity  // 좌우 드래그 → Y축 회전
+
+        // 각 축에 대한 회전 쿼터니언 생성
+        let rotationX = simd_quatf(angle: angleX, axis: SIMD3<Float>(1, 0, 0))
+        let rotationY = simd_quatf(angle: angleY, axis: SIMD3<Float>(0, 1, 0))
+
+        // 드래그 시작 쿼터니언에 새 회전 적용
+        // 순서: Y축 회전 → X축 회전 → 기존 회전
+        rotationQuaternion = simd_normalize(rotationY * rotationX * dragStartQuaternion)
+    }
+
+    /// 드래그 시작 시 호출
+    func beginDrag() {
+        dragStartQuaternion = rotationQuaternion
+    }
+
+    /// 쿼터니언을 4x4 회전 행렬로 변환
+    private func quaternionToMatrix(_ q: simd_quatf) -> float4x4 {
+        let n = simd_normalize(q)
+        let x = n.imag.x, y = n.imag.y, z = n.imag.z, w = n.real
+
+        return float4x4(columns: (
+            SIMD4<Float>(1 - 2*y*y - 2*z*z, 2*x*y + 2*w*z, 2*x*z - 2*w*y, 0),
+            SIMD4<Float>(2*x*y - 2*w*z, 1 - 2*x*x - 2*z*z, 2*y*z + 2*w*x, 0),
+            SIMD4<Float>(2*x*z + 2*w*y, 2*y*z - 2*w*x, 1 - 2*x*x - 2*y*y, 0),
+            SIMD4<Float>(0, 0, 0, 1)
+        ))
+    }
 
     // ════════════════════════════════════════════════════════════════════════
     // MARK: - Initialization
@@ -1343,78 +1408,76 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
 
     /// GPU 리소스 생성
     ///
-    /// 버텍스 버퍼, 유니폼 버퍼, 깊이 스텐실 상태를 생성합니다.
-    ///
-    /// ## 버텍스 데이터
-    ///
-    /// ```
-    ///            Red (0.0, 0.5, 0.0)
-    ///                  ▲
-    ///                 ╱ ╲
-    ///                ╱   ╲
-    ///               ╱     ╲
-    ///              ╱       ╲
-    ///             ╱         ╲
-    ///            ▼───────────▼
-    ///   Blue (-0.5, -0.5)   Green (0.5, -0.5)
-    /// ```
+    /// OBJ 파일을 로드하여 버텍스 버퍼, 인덱스 버퍼, 유니폼 버퍼, 깊이 스텐실 상태를 생성합니다.
     private func buildResources() {
         // ────────────────────────────────────────────────────────────────────
-        // 삼각형 버텍스 정의
+        // OBJ/MTL 파일 로드
         // ────────────────────────────────────────────────────────────────────
-        // 왼손 좌표계(Left-Hand Coordinate System):
-        // - +X: 오른쪽
-        // - +Y: 위쪽
-        // - +Z: 화면 안쪽 (멀어지는 방향)
-        //
-        // 버텍스 순서: 시계 방향 (Counter-Clockwise에서 바라볼 때)
-        // Front-face culling을 위해 setFrontFacing(.counterClockwise) 설정 필요
-        let vertices: [Vertex] = [
-            // 상단 - 빨간색
-            Vertex(position: SIMD3<Float>(0.0, 0.5, 0.0),
-                   color: SIMD4<Float>(1.0, 0.0, 0.0, 1.0)),
+        let loader = OBJLoader()
 
-            // 우하단 - 초록색
-            Vertex(position: SIMD3<Float>(0.5, -0.5, 0.0),
-                   color: SIMD4<Float>(0.0, 1.0, 0.0, 1.0)),
+        // Bundle에서 파일 찾기 시도 (여러 경로 시도)
+        var objURL: URL?
+        var mtlURL: URL?
 
-            // 좌하단 - 파란색
-            Vertex(position: SIMD3<Float>(-0.5, -0.5, 0.0),
-                   color: SIMD4<Float>(0.0, 0.0, 1.0, 1.0))
-        ]
+        // 1. Bundle.main에서 res 서브디렉토리로 찾기
+        objURL = Bundle.main.url(forResource: "bus_dark_original", withExtension: "obj", subdirectory: "res")
+        mtlURL = Bundle.main.url(forResource: "bus_dark_original", withExtension: "mtl", subdirectory: "res")
+
+        // 2. Bundle.main 루트에서 찾기
+        if objURL == nil {
+            objURL = Bundle.main.url(forResource: "bus_dark_original", withExtension: "obj")
+            mtlURL = Bundle.main.url(forResource: "bus_dark_original", withExtension: "mtl")
+        }
+
+        // 3. 소스 디렉토리에서 직접 찾기 (개발 중)
+        if objURL == nil {
+            let sourceDir = URL(fileURLWithPath: #file).deletingLastPathComponent()
+            let resDir = sourceDir.appendingPathComponent("res")
+            let possibleObjURL = resDir.appendingPathComponent("bus_dark_original.obj")
+            let possibleMtlURL = resDir.appendingPathComponent("bus_dark_original.mtl")
+
+            if FileManager.default.fileExists(atPath: possibleObjURL.path) {
+                objURL = possibleObjURL
+                mtlURL = possibleMtlURL
+            }
+        }
+
+        guard let finalObjURL = objURL, let finalMtlURL = mtlURL else {
+            fatalError("""
+                ❌ OBJ/MTL 파일을 찾을 수 없습니다.
+
+                res 폴더를 Xcode 프로젝트에 추가해주세요:
+                1. Xcode에서 Metal4Render 그룹 우클릭
+                2. "Add Files to Metal4Render..." 선택
+                3. res 폴더 선택
+                4. "Copy items if needed" 체크
+                5. "Create folder references" 선택
+                """)
+        }
+
+        guard let mesh = try? loader.load(objURL: finalObjURL, mtlURL: finalMtlURL) else {
+            fatalError("❌ OBJ 파일 로드 실패")
+        }
+
+        print("✅ OBJ 로드 완료: \(mesh.vertexCount) vertices, \(mesh.indexCount) indices")
 
         // ────────────────────────────────────────────────────────────────────
         // 버텍스 버퍼 생성
         // ────────────────────────────────────────────────────────────────────
-        // .storageModeShared: CPU와 GPU 모두 접근 가능
-        // 작은 데이터에 적합하며, 매 프레임 업데이트가 필요한 경우에도 사용
         vertexBuffer = device.makeBuffer(
-            bytes: vertices,
-            length: MemoryLayout<Vertex>.stride * vertices.count,
+            bytes: mesh.vertices,
+            length: MemoryLayout<Vertex>.stride * mesh.vertices.count,
             options: .storageModeShared
         )
 
         // ────────────────────────────────────────────────────────────────────
-        // 인덱스 버퍼 생성
+        // 인덱스 버퍼 생성 (UInt32 - 65535개 이상의 버텍스 지원)
         // ────────────────────────────────────────────────────────────────────
-        // 인덱스 버퍼는 버텍스를 재사용하여 메모리를 절약합니다.
-        // 예: 사각형은 4개의 버텍스와 6개의 인덱스로 2개의 삼각형을 표현
-        //     (버텍스 6개 대신 4개로 충분)
-        //
-        // 현재 삼각형:
-        // 버텍스 0 (상단) ──── 버텍스 1 (우하단)
-        //        ╲              ╱
-        //         ╲            ╱
-        //          ╲          ╱
-        //           버텍스 2 (좌하단)
-        //
-        // 인덱스 순서: 0 → 1 → 2 (시계 방향)
-        let indices: [UInt16] = [0, 1, 2]
-        indexCount = indices.count
+        indexCount = mesh.indices.count
 
         indexBuffer = device.makeBuffer(
-            bytes: indices,
-            length: MemoryLayout<UInt16>.stride * indices.count,
+            bytes: mesh.indices,
+            length: MemoryLayout<UInt32>.stride * mesh.indices.count,
             options: .storageModeShared
         )
 
@@ -1715,6 +1778,35 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
         ))
     }
 
+    /// 균등 스케일 행렬 생성
+    ///
+    /// - Parameter s: 스케일 값 (모든 축에 동일하게 적용)
+    /// - Returns: 4x4 스케일 행렬
+    func scale(_ s: Float) -> float4x4 {
+        return float4x4(columns: (
+            SIMD4<Float>(s, 0, 0, 0),     // 열 0: X 스케일
+            SIMD4<Float>(0, s, 0, 0),     // 열 1: Y 스케일
+            SIMD4<Float>(0, 0, s, 0),     // 열 2: Z 스케일
+            SIMD4<Float>(0, 0, 0, 1)      // 열 3: 이동 없음
+        ))
+    }
+
+    /// 이동 행렬 생성
+    ///
+    /// - Parameters:
+    ///   - tx: X축 이동량
+    ///   - ty: Y축 이동량
+    ///   - tz: Z축 이동량
+    /// - Returns: 4x4 이동 행렬
+    func translate(_ tx: Float, _ ty: Float, _ tz: Float) -> float4x4 {
+        return float4x4(columns: (
+            SIMD4<Float>(1, 0, 0, 0),     // 열 0
+            SIMD4<Float>(0, 1, 0, 0),     // 열 1
+            SIMD4<Float>(0, 0, 1, 0),     // 열 2
+            SIMD4<Float>(tx, ty, tz, 1)   // 열 3: 이동 벡터
+        ))
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     // MARK: - MTKViewDelegate
     // ════════════════════════════════════════════════════════════════════════
@@ -1790,24 +1882,30 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
         }
 
         // ────────────────────────────────────────────────────────────────────
-        // 2. 애니메이션 업데이트
-        // ────────────────────────────────────────────────────────────────────
-        rotation += 0.02  // 매 프레임 약 1.1도 회전
-
-        // ────────────────────────────────────────────────────────────────────
-        // 3. 변환 행렬 계산
+        // 2. 변환 행렬 계산
         // ────────────────────────────────────────────────────────────────────
         let aspect = Float(view.drawableSize.width / view.drawableSize.height)
 
-        // Model Matrix: Y축 회전
-        let modelMatrix = rotationY(rotation)
+        // Model Matrix: 이동 × 스케일 × 회전 (쿼터니언 기반)
+        //
+        // 변환 순서 (오른쪽에서 왼쪽으로 적용):
+        // 1. 모델 중심을 원점으로 이동 (centeringMatrix)
+        // 2. 100배 확대 (scaleMatrix)
+        // 3. 쿼터니언 회전 (rotationMatrix)
+        //
+        // OBJ 모델의 바운딩 박스 중심: (0.0025, 0.0065, -0.025)
+        // 이를 원점으로 이동시켜 회전 중심이 모델 중심이 되도록 함
+        let centeringMatrix = translate(-0.0025, -0.0065, 0.025)
+        let scaleMatrix = scale(100.0)
+        let rotationMatrix = quaternionToMatrix(rotationQuaternion)
+        let modelMatrix = rotationMatrix * scaleMatrix * centeringMatrix
 
         // View Matrix: 카메라 설정
-        // - 카메라 위치: (0, 0, -3) - 삼각형 앞에 위치
-        // - 바라보는 점: (0, 0, 0) - 원점
+        // - 카메라 위치: 원점에서 cameraDistance 만큼 떨어진 위치
+        // - 바라보는 점: (0, 0, 0) - 모델 원점 (회전 중심)
         // - 위쪽 방향: (0, 1, 0) - Y축이 위
-        let eye = SIMD3<Float>(0, 0, -3)
-        let target = SIMD3<Float>(0, 0, 0)
+        let eye = SIMD3<Float>(0, 0.5, -cameraDistance)
+        let target = SIMD3<Float>(0, 0, 0)  // 회전 중심 = 모델 원점
         let up = SIMD3<Float>(0, 1, 0)
         let viewMatrix = lookAtLH(eye: eye, target: target, up: up)
 
@@ -1882,7 +1980,7 @@ class Metal4Renderer: NSObject, MTKViewDelegate {
         renderEncoder.drawIndexedPrimitives(
             primitiveType: .triangle,
             indexCount: indexCount,
-            indexType: .uint16,
+            indexType: .uint32,  // OBJ 모델은 65535개 이상의 버텍스를 가질 수 있음
             indexBuffer: indexBuffer.gpuAddress,
             indexBufferLength: indexBuffer.length
         )
