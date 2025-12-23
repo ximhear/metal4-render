@@ -118,11 +118,11 @@ class OBJLoader {
 
     /// 버스 모델의 머티리얼 이름에 대한 사전 정의된 속성
     private static let busMaterials: [String: BusMaterialInfo] = [
-        // 버스 차체 - 진한 남색/검정 (도장된 금속, 약간의 광택)
+        // 버스 차체 - 강렬한 빨간색 (광택 있는 도장)
         "citybus3_dark": BusMaterialInfo(
-            color: SIMD4<Float>(0.08, 0.10, 0.15, 1.0),
-            metallic: 0.1,
-            roughness: 0.35,
+            color: SIMD4<Float>(0.85, 0.12, 0.08, 1.0),
+            metallic: 0.15,
+            roughness: 0.25,
             emission: 0.0,
             materialType: .standard
         ),
