@@ -2159,10 +2159,12 @@ class LegacyMetalRenderer: NSObject, MTKViewDelegate {
         // 삼각형 버텍스 데이터
         // 노말은 삼각형 평면에 수직인 방향 (카메라를 향해 -Z)
         let normal = SIMD3<Float>(0, 0, -1)
+        // 기본 머티리얼 파라미터: metallic=0, roughness=0.5, emission=0, type=standard
+        let defaultMaterial = SIMD4<Float>(0.0, 0.5, 0.0, 0.0)
         let vertices: [Vertex] = [
-            Vertex(position: SIMD3<Float>(0.0, 0.5, 0.0), normal: normal, color: SIMD4<Float>(1.0, 0.0, 0.0, 1.0)),
-            Vertex(position: SIMD3<Float>(0.5, -0.5, 0.0), normal: normal, color: SIMD4<Float>(0.0, 1.0, 0.0, 1.0)),
-            Vertex(position: SIMD3<Float>(-0.5, -0.5, 0.0), normal: normal, color: SIMD4<Float>(0.0, 0.0, 1.0, 1.0))
+            Vertex(position: SIMD3<Float>(0.0, 0.5, 0.0), normal: normal, color: SIMD4<Float>(1.0, 0.0, 0.0, 1.0), materialParams: defaultMaterial),
+            Vertex(position: SIMD3<Float>(0.5, -0.5, 0.0), normal: normal, color: SIMD4<Float>(0.0, 1.0, 0.0, 1.0), materialParams: defaultMaterial),
+            Vertex(position: SIMD3<Float>(-0.5, -0.5, 0.0), normal: normal, color: SIMD4<Float>(0.0, 0.0, 1.0, 1.0), materialParams: defaultMaterial)
         ]
 
         vertexBuffer = device.makeBuffer(
