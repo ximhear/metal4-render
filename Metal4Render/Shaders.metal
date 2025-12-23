@@ -1139,11 +1139,10 @@ fragment float4 fragmentShader(
         color += albedo * emission;
     }
 
-    // 톤 매핑 (간단한 Reinhard)
-    color = color / (color + float3(1.0));
-
-    // 감마 보정
-    color = pow(color, float3(1.0 / 2.2));
+    // 대비 및 채도 강화
+    float3 gray = float3(dot(color, float3(0.299, 0.587, 0.114)));
+    color = mix(gray, color, 1.3);  // 채도 30% 증가
+    color = (color - 0.5) * 1.2 + 0.5;  // 대비 20% 증가
 
     return float4(clamp(color, 0.0, 1.0), in.color.a);
 }
