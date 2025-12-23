@@ -944,6 +944,15 @@ struct Vertex {
     /// - z (b): 파란색 강도
     /// - w (a): 알파(불투명도), 1.0 = 완전 불투명
     var color: SIMD4<Float>
+
+    /// 머티리얼 파라미터 (PBR)
+    ///
+    /// 각 컴포넌트의 의미:
+    /// - x: metallic (금속성, 0.0 = 비금속, 1.0 = 금속)
+    /// - y: roughness (거칠기, 0.0 = 매끄러움, 1.0 = 거침)
+    /// - z: emission (발광 강도, 0.0 = 발광 없음)
+    /// - w: materialType (0 = 기본, 1 = 유리, 2 = 금속, 3 = LED)
+    var materialParams: SIMD4<Float>
 }
 
 /// 유니폼(Uniform) 데이터 구조체

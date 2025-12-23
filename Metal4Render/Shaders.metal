@@ -647,6 +647,13 @@ struct Vertex {
     /// - b: 파란색 강도 (0.0 ~ 1.0)
     /// - a: 불투명도 (0.0 = 투명, 1.0 = 불투명)
     float4 color;
+
+    /// 머티리얼 파라미터 (PBR)
+    /// - x: metallic (금속성, 0.0 = 비금속, 1.0 = 금속)
+    /// - y: roughness (거칠기, 0.0 = 매끄러움, 1.0 = 거침)
+    /// - z: emission (발광 강도)
+    /// - w: materialType (0 = 기본, 1 = 유리, 2 = 금속, 3 = LED, 4 = 고무)
+    float4 materialParams;
 };
 
 /// 버텍스 셰이더 출력 / 프래그먼트 셰이더 입력 구조체
@@ -695,6 +702,10 @@ struct VertexOut {
     /// (Barycentric Coordinates)를 사용하여 부드럽게 보간합니다.
     /// 이를 통해 그라디언트 효과가 자연스럽게 생성됩니다.
     float4 color;
+
+    /// 머티리얼 파라미터 (PBR)
+    /// 버텍스 셰이더에서 프래그먼트 셰이더로 전달됨
+    float4 materialParams;
 };
 
 /// 유니폼(Uniform) 데이터 구조체
@@ -911,6 +922,11 @@ vertex VertexOut vertexShader(
     //
     out.color = vertices[vertexID].color;
 
+    // ────────────────────────────────────────────────────────────────
+    // 머티리얼 파라미터 전달 (PBR)
+    // ────────────────────────────────────────────────────────────────
+    out.materialParams = vertices[vertexID].materialParams;
+
     return out;
 }
 
@@ -973,62 +989,161 @@ vertex VertexOut vertexShader(
 ///
 /// - Note: 삼각형 내부의 모든 픽셀에 대해 실행되므로,
 ///         작은 삼각형이라도 수백~수천 번 실행될 수 있습니다.
+// ============================================================================
+// MARK: - PBR 헬퍼 함수
+// ============================================================================
+
+/// 프레넬-슐릭 근사 (Fresnel-Schlick Approximation)
+/// 시선 각도에 따른 반사 강도 계산
+float3 fresnelSchlick(float cosTheta, float3 F0) {
+    return F0 + (1.0 - F0) * pow(saturate(1.0 - cosTheta), 5.0);
+}
+
+/// GGX/Trowbridge-Reitz 노말 분포 함수
+float distributionGGX(float3 N, float3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+
+    float nom = a2;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = 3.14159265 * denom * denom;
+
+    return nom / denom;
+}
+
+/// 슐릭-GGX 지오메트리 함수
+float geometrySchlickGGX(float NdotV, float roughness) {
+    float r = (roughness + 1.0);
+    float k = (r * r) / 8.0;
+
+    float nom = NdotV;
+    float denom = NdotV * (1.0 - k) + k;
+
+    return nom / denom;
+}
+
+/// 스미스 지오메트리 함수
+float geometrySmith(float3 N, float3 V, float3 L, float roughness) {
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float ggx2 = geometrySchlickGGX(NdotV, roughness);
+    float ggx1 = geometrySchlickGGX(NdotL, roughness);
+
+    return ggx1 * ggx2;
+}
+
 fragment float4 fragmentShader(
     VertexOut in [[stage_in]],
     const device Uniforms* uniforms [[buffer(1)]]
 ) {
     // ────────────────────────────────────────────────────────────────
-    // Blinn-Phong 라이팅 모델
+    // 머티리얼 파라미터 추출
     // ────────────────────────────────────────────────────────────────
-    //
-    // 라이팅 구성요소:
-    // 1. Ambient (환경광): 모든 방향에서 오는 간접광
-    // 2. Diffuse (확산광): 표면에서 모든 방향으로 균일하게 반사
-    // 3. Specular (반사광): 특정 방향으로 강하게 반사 (하이라이트)
-    //
+    float metallic = in.materialParams.x;
+    float roughness = in.materialParams.y;
+    float emission = in.materialParams.z;
+    float materialType = in.materialParams.w;
 
-    // 노말과 라이트 방향 정규화
-    float3 normal = normalize(in.worldNormal);
-    float3 lightDir = normalize(uniforms->lightDirection);
+    // 노말과 방향 벡터
+    float3 N = normalize(in.worldNormal);
+    float3 V = normalize(uniforms->eyePosition - in.worldPosition);
+    float3 L = normalize(uniforms->lightDirection);
+    float3 H = normalize(V + L);
 
-    // ────────────────────────────────────────────────────────────────
-    // 1. Ambient (환경광)
-    // ────────────────────────────────────────────────────────────────
-    float ambientStrength = 0.3;
-    float3 ambient = ambientStrength * in.color.rgb;
+    // 기본 색상 (알베도)
+    float3 albedo = in.color.rgb;
 
     // ────────────────────────────────────────────────────────────────
-    // 2. Diffuse (확산광) - Lambertian 반사
+    // 머티리얼 타입별 특수 처리
     // ────────────────────────────────────────────────────────────────
-    //
-    // dot(N, L) = cos(θ) : 노말과 빛 방향 사이의 각도
-    // 빛이 표면에 수직일수록 밝음 (cos(0°) = 1.0)
-    // 빛이 표면과 평행하면 어두움 (cos(90°) = 0.0)
-    //
-    float diff = max(dot(normal, lightDir), 0.0);
-    float3 diffuse = diff * in.color.rgb;
+
+    // LED/발광체 (materialType == 3)
+    if (materialType > 2.5 && materialType < 3.5) {
+        // 발광체는 라이팅 계산 없이 발광 색상 반환
+        float3 emissionColor = albedo * (1.0 + emission);
+        // 글로우 효과를 위한 추가 밝기
+        emissionColor = emissionColor + albedo * emission * 0.5;
+        return float4(clamp(emissionColor, 0.0, 1.0), in.color.a);
+    }
 
     // ────────────────────────────────────────────────────────────────
-    // 3. Specular (반사광) - Blinn-Phong
+    // PBR 라이팅 계산
     // ────────────────────────────────────────────────────────────────
-    //
-    // Half vector: 빛 방향과 뷰 방향의 중간 벡터
-    // 하이라이트 크기는 shininess로 조절 (높을수록 날카로운 반사)
-    //
-    float3 viewDir = normalize(uniforms->eyePosition - in.worldPosition);
-    float3 halfDir = normalize(lightDir + viewDir);
-    float shininess = 32.0;
-    float spec = pow(max(dot(normal, halfDir), 0.0), shininess);
-    float specularStrength = 0.5;
-    float3 specular = specularStrength * spec * float3(1.0);  // 흰색 하이라이트
+
+    // F0: 표면 반사율 (비금속: 0.04, 금속: 알베도 색상)
+    float3 F0 = float3(0.04);
+    F0 = mix(F0, albedo, metallic);
+
+    // 라이트 기여도 계산
+    float NdotL = max(dot(N, L), 0.0);
+
+    // Cook-Torrance BRDF
+    float NDF = distributionGGX(N, H, roughness);
+    float G = geometrySmith(N, V, L, roughness);
+    float3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+
+    float3 nominator = NDF * G * F;
+    float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
+    float3 specular = nominator / denominator;
+
+    // kS: 반사 비율 (프레넬)
+    // kD: 굴절/확산 비율 (금속은 확산 없음)
+    float3 kS = F;
+    float3 kD = float3(1.0) - kS;
+    kD *= 1.0 - metallic;
+
+    // 디퓨즈 + 스페큘러
+    float3 Lo = (kD * albedo / 3.14159265 + specular) * NdotL;
+
+    // ────────────────────────────────────────────────────────────────
+    // 환경광 (Ambient)
+    // ────────────────────────────────────────────────────────────────
+    float3 ambient = float3(0.15) * albedo;
+
+    // 유리 (materialType == 1): 더 강한 프레넬 반사
+    if (materialType > 0.5 && materialType < 1.5) {
+        float fresnel = pow(1.0 - max(dot(N, V), 0.0), 4.0);
+        float3 glassReflection = float3(0.5, 0.55, 0.6) * fresnel * 0.6;
+        Lo = Lo * 0.7 + glassReflection;
+        ambient *= 0.5;  // 유리는 환경광 감소
+    }
+
+    // 고무 (materialType == 4): 무광 효과
+    if (materialType > 3.5 && materialType < 4.5) {
+        Lo *= 0.7;  // 반사 감소
+        ambient *= 1.2;  // 환경광 증가 (부드러운 확산)
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 림 라이팅 (Rim Lighting)
+    // ────────────────────────────────────────────────────────────────
+    // 가장자리 하이라이트로 입체감 강조
+    float rim = 1.0 - max(dot(N, V), 0.0);
+    rim = pow(rim, 3.0) * 0.15;
+    float3 rimColor = float3(0.4, 0.45, 0.5) * rim;
+
+    // 금속 (materialType == 2): 더 강한 림 라이팅
+    if (materialType > 1.5 && materialType < 2.5) {
+        rimColor = albedo * rim * 0.5;
+    }
 
     // ────────────────────────────────────────────────────────────────
     // 최종 색상 합성
     // ────────────────────────────────────────────────────────────────
-    float3 result = ambient + diffuse + specular;
+    float3 color = ambient + Lo + rimColor;
 
-    // 색상 클램핑 (0.0 ~ 1.0 범위로 제한)
-    result = clamp(result, 0.0, 1.0);
+    // 발광 추가 (emission > 0인 경우)
+    if (emission > 0.0) {
+        color += albedo * emission;
+    }
 
-    return float4(result, in.color.a);
+    // 톤 매핑 (간단한 Reinhard)
+    color = color / (color + float3(1.0));
+
+    // 감마 보정
+    color = pow(color, float3(1.0 / 2.2));
+
+    return float4(clamp(color, 0.0, 1.0), in.color.a);
 }

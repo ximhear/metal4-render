@@ -10,12 +10,27 @@ import simd
 
 // MARK: - 데이터 구조체
 
+/// 머티리얼 타입 열거형
+enum MaterialType: Float {
+    case standard = 0.0   // 기본 표면
+    case glass = 1.0      // 유리 (투명, 반사)
+    case metal = 2.0      // 금속 (높은 반사)
+    case led = 3.0        // LED/발광체
+    case rubber = 4.0     // 고무 (바퀴)
+}
+
 /// MTL 파일에서 파싱한 머티리얼 정보
 struct OBJMaterial {
     var name: String
     var diffuseColor: SIMD4<Float>  // Kd 값 (RGB) + Alpha
     var ambientColor: SIMD4<Float>? // Ka 값 (Kd가 없을 때 fallback)
     var hasExplicitColor: Bool = false  // Kd 또는 Ka가 명시적으로 설정되었는지
+
+    // PBR 머티리얼 속성
+    var metallic: Float = 0.0      // 금속성 (0.0 ~ 1.0)
+    var roughness: Float = 0.5     // 거칠기 (0.0 ~ 1.0)
+    var emission: Float = 0.0      // 발광 강도
+    var materialType: MaterialType = .standard
 
     init(name: String, diffuseColor: SIMD3<Float> = SIMD3<Float>(0.8, 0.8, 0.8)) {
         self.name = name
@@ -30,6 +45,11 @@ struct OBJMaterial {
             return ambient
         }
         return diffuseColor
+    }
+
+    /// 머티리얼 파라미터를 SIMD4로 반환
+    var materialParams: SIMD4<Float> {
+        return SIMD4<Float>(metallic, roughness, emission, materialType.rawValue)
     }
 }
 
@@ -78,49 +98,138 @@ class OBJLoader {
         }
     }
 
+    // MARK: - Material Info Structure
+
+    /// 버스 머티리얼 정보 구조체
+    struct BusMaterialInfo {
+        var color: SIMD4<Float>
+        var metallic: Float
+        var roughness: Float
+        var emission: Float
+        var materialType: MaterialType
+
+        /// 머티리얼 파라미터를 SIMD4로 반환
+        var materialParams: SIMD4<Float> {
+            return SIMD4<Float>(metallic, roughness, emission, materialType.rawValue)
+        }
+    }
+
     // MARK: - Color Generation
 
-    /// 버스 모델의 머티리얼 이름에 대한 사전 정의된 색상
-    private static let busColors: [String: SIMD4<Float>] = [
-        // 버스 차체 - 진한 남색/검정
-        "citybus3_dark": SIMD4<Float>(0.15, 0.15, 0.2, 1.0),
-        // LED 조명 - 밝은 노란색
-        "citybus_led": SIMD4<Float>(1.0, 0.9, 0.3, 1.0),
-        // 거울 - 반사되는 은색
-        "mirror_citybus_dark": SIMD4<Float>(0.6, 0.6, 0.65, 1.0),
-        // 유리 - 투명한 파란색 (반투명)
-        "glass": SIMD4<Float>(0.3, 0.4, 0.5, 0.7),
-        "Glass_Clear": SIMD4<Float>(0.3, 0.4, 0.5, 0.7),
-        // 바퀴 - 검정색
-        "wheel": SIMD4<Float>(0.1, 0.1, 0.1, 1.0),
-        // 파란색 버스 (선택사항)
-        "Bus_Blue": SIMD4<Float>(0.1, 0.3, 0.6, 1.0)
+    /// 버스 모델의 머티리얼 이름에 대한 사전 정의된 속성
+    private static let busMaterials: [String: BusMaterialInfo] = [
+        // 버스 차체 - 진한 남색/검정 (도장된 금속, 약간의 광택)
+        "citybus3_dark": BusMaterialInfo(
+            color: SIMD4<Float>(0.08, 0.10, 0.15, 1.0),
+            metallic: 0.1,
+            roughness: 0.35,
+            emission: 0.0,
+            materialType: .standard
+        ),
+        // LED 조명 - 밝은 노란색 (발광)
+        "citybus_led": BusMaterialInfo(
+            color: SIMD4<Float>(1.0, 0.85, 0.2, 1.0),
+            metallic: 0.0,
+            roughness: 0.3,
+            emission: 2.0,  // 강한 발광
+            materialType: .led
+        ),
+        // 거울 - 반사되는 크롬 (높은 금속성)
+        "mirror_citybus_dark": BusMaterialInfo(
+            color: SIMD4<Float>(0.9, 0.9, 0.92, 1.0),
+            metallic: 0.95,
+            roughness: 0.05,  // 매우 매끄러움
+            emission: 0.0,
+            materialType: .metal
+        ),
+        // 유리 - 투명한 파란색 (반투명, 반사)
+        "glass": BusMaterialInfo(
+            color: SIMD4<Float>(0.15, 0.25, 0.35, 0.4),
+            metallic: 0.0,
+            roughness: 0.05,  // 매우 매끄러움
+            emission: 0.0,
+            materialType: .glass
+        ),
+        "Glass_Clear": BusMaterialInfo(
+            color: SIMD4<Float>(0.2, 0.3, 0.4, 0.35),
+            metallic: 0.0,
+            roughness: 0.02,
+            emission: 0.0,
+            materialType: .glass
+        ),
+        // 바퀴 - 검정 고무 (무광)
+        "wheel": BusMaterialInfo(
+            color: SIMD4<Float>(0.02, 0.02, 0.02, 1.0),
+            metallic: 0.0,
+            roughness: 0.9,  // 거친 고무
+            emission: 0.0,
+            materialType: .rubber
+        ),
+        // 파란색 버스 차체
+        "Bus_Blue": BusMaterialInfo(
+            color: SIMD4<Float>(0.05, 0.15, 0.4, 1.0),
+            metallic: 0.15,
+            roughness: 0.3,
+            emission: 0.0,
+            materialType: .standard
+        ),
+        // 헤드라이트
+        "headlight": BusMaterialInfo(
+            color: SIMD4<Float>(1.0, 1.0, 0.95, 1.0),
+            metallic: 0.0,
+            roughness: 0.1,
+            emission: 3.0,
+            materialType: .led
+        ),
+        // 테일라이트 (빨간색)
+        "taillight": BusMaterialInfo(
+            color: SIMD4<Float>(1.0, 0.1, 0.05, 1.0),
+            metallic: 0.0,
+            roughness: 0.1,
+            emission: 2.5,
+            materialType: .led
+        ),
+        // 크롬 범퍼/트림
+        "chrome": BusMaterialInfo(
+            color: SIMD4<Float>(0.95, 0.95, 0.97, 1.0),
+            metallic: 1.0,
+            roughness: 0.02,
+            emission: 0.0,
+            materialType: .metal
+        )
     ]
 
-    /// 머티리얼 이름으로 버스 색상 찾기
+    /// 머티리얼 이름으로 버스 머티리얼 정보 찾기
     /// - Parameter name: 머티리얼 이름
-    /// - Returns: 매칭되는 색상 또는 nil
-    private static func findBusColor(_ name: String) -> SIMD4<Float>? {
+    /// - Returns: 매칭되는 머티리얼 정보 또는 nil
+    private static func findBusMaterial(_ name: String) -> BusMaterialInfo? {
         // 정확한 매칭 시도
-        if let color = busColors[name] {
-            return color
+        if let material = busMaterials[name] {
+            return material
         }
         // 부분 문자열 매칭 (예: "citybus3_dark.007" -> "citybus3_dark")
-        for (key, color) in busColors {
+        for (key, material) in busMaterials {
             if name.lowercased().contains(key.lowercased()) {
-                return color
+                return material
             }
         }
         return nil
     }
 
-    /// 머티리얼 이름에서 고유 색상 생성
+    /// 머티리얼 이름으로 버스 색상 찾기 (하위 호환성)
     /// - Parameter name: 머티리얼 이름
-    /// - Returns: 사전 정의 색상 또는 이름 해시 기반의 RGBA 색상
-    private static func generateColorFromName(_ name: String) -> SIMD4<Float> {
-        // 먼저 버스 관련 색상 확인
-        if let busColor = findBusColor(name) {
-            return busColor
+    /// - Returns: 매칭되는 색상 또는 nil
+    private static func findBusColor(_ name: String) -> SIMD4<Float>? {
+        return findBusMaterial(name)?.color
+    }
+
+    /// 머티리얼 이름에서 머티리얼 정보 생성
+    /// - Parameter name: 머티리얼 이름
+    /// - Returns: 사전 정의 머티리얼 또는 이름 해시 기반의 기본 머티리얼
+    private static func generateMaterialFromName(_ name: String) -> BusMaterialInfo {
+        // 먼저 버스 관련 머티리얼 확인
+        if let busMaterial = findBusMaterial(name) {
+            return busMaterial
         }
 
         // 이름 해시를 사용하여 일관된 색상 생성
@@ -151,7 +260,21 @@ class OBJLoader {
         default: (r, g, b) = (c, 0, x)
         }
 
-        return SIMD4<Float>(r + m, g + m, b + m, 1.0)
+        // 기본 머티리얼 속성 반환
+        return BusMaterialInfo(
+            color: SIMD4<Float>(r + m, g + m, b + m, 1.0),
+            metallic: 0.0,
+            roughness: 0.5,
+            emission: 0.0,
+            materialType: .standard
+        )
+    }
+
+    /// 머티리얼 이름에서 고유 색상 생성 (하위 호환성)
+    /// - Parameter name: 머티리얼 이름
+    /// - Returns: 사전 정의 색상 또는 이름 해시 기반의 RGBA 색상
+    private static func generateColorFromName(_ name: String) -> SIMD4<Float> {
+        return generateMaterialFromName(name).color
     }
 
     // MARK: - Public Methods
@@ -267,8 +390,14 @@ class OBJLoader {
         // Key: "posIdx/texIdx/normalIdx", Value: 버텍스 인덱스
         var vertexCache: [String: UInt32] = [:]
 
-        // 현재 머티리얼
-        var currentColor = SIMD4<Float>(0.8, 0.8, 0.8, 1.0)  // 기본 회색
+        // 현재 머티리얼 정보
+        var currentMaterialInfo = BusMaterialInfo(
+            color: SIMD4<Float>(0.8, 0.8, 0.8, 1.0),
+            metallic: 0.0,
+            roughness: 0.5,
+            emission: 0.0,
+            materialType: .standard
+        )
 
         let lines = content.components(separatedBy: .newlines)
 
@@ -313,20 +442,33 @@ class OBJLoader {
             case "usemtl":
                 // 머티리얼 변경
                 let materialName = parts.dropFirst().joined(separator: " ")
-                if let material = materials[materialName] {
-                    currentColor = material.finalColor
-                    // Ka가 흰색(1,1,1)이고 Kd가 없으면 머티리얼 이름 기반 색상 생성
+
+                // 먼저 버스 머티리얼 정보 확인 (우선순위 높음)
+                if let busMaterial = Self.findBusMaterial(materialName) {
+                    currentMaterialInfo = busMaterial
+                } else if let material = materials[materialName] {
+                    // MTL 파일에서 로드된 머티리얼 사용
+                    var matInfo = BusMaterialInfo(
+                        color: material.finalColor,
+                        metallic: material.metallic,
+                        roughness: material.roughness,
+                        emission: material.emission,
+                        materialType: material.materialType
+                    )
+
+                    // Ka가 흰색(1,1,1)이고 Kd가 없으면 머티리얼 이름 기반 정보 생성
                     if !material.hasExplicitColor {
                         let isWhiteAmbient = material.ambientColor.map {
                             $0.x > 0.9 && $0.y > 0.9 && $0.z > 0.9
                         } ?? true
                         if isWhiteAmbient {
-                            currentColor = Self.generateColorFromName(materialName)
+                            matInfo = Self.generateMaterialFromName(materialName)
                         }
                     }
+                    currentMaterialInfo = matInfo
                 } else {
-                    // 머티리얼이 없으면 이름 기반 색상 생성
-                    currentColor = Self.generateColorFromName(materialName)
+                    // 머티리얼이 없으면 이름 기반 정보 생성
+                    currentMaterialInfo = Self.generateMaterialFromName(materialName)
                 }
 
             case "f":
@@ -345,7 +487,7 @@ class OBJLoader {
                             positions: positions,
                             texCoords: texCoords,
                             normals: normals,
-                            currentColor: currentColor,
+                            materialInfo: currentMaterialInfo,
                             vertices: &vertices,
                             vertexCache: &vertexCache
                         )
@@ -376,13 +518,13 @@ class OBJLoader {
         positions: [SIMD3<Float>],
         texCoords: [SIMD2<Float>],
         normals: [SIMD3<Float>],
-        currentColor: SIMD4<Float>,
+        materialInfo: BusMaterialInfo,
         vertices: inout [Vertex],
         vertexCache: inout [String: UInt32]
     ) throws -> UInt32 {
 
-        // 캐시 키 생성 (색상 포함)
-        let cacheKey = "\(faceVertex)_\(currentColor.x)_\(currentColor.y)_\(currentColor.z)"
+        // 캐시 키 생성 (색상 및 머티리얼 포함)
+        let cacheKey = "\(faceVertex)_\(materialInfo.color.x)_\(materialInfo.color.y)_\(materialInfo.color.z)_\(materialInfo.metallic)_\(materialInfo.roughness)"
 
         // 캐시에 있으면 기존 인덱스 반환
         if let cachedIndex = vertexCache[cacheKey] {
@@ -414,8 +556,13 @@ class OBJLoader {
             }
         }
 
-        // 새 버텍스 생성 (노말 포함)
-        let vertex = Vertex(position: position, normal: normal, color: currentColor)
+        // 새 버텍스 생성 (노말 및 머티리얼 파라미터 포함)
+        let vertex = Vertex(
+            position: position,
+            normal: normal,
+            color: materialInfo.color,
+            materialParams: materialInfo.materialParams
+        )
 
         // 버텍스 배열에 추가
         let newIndex = UInt32(vertices.count)
